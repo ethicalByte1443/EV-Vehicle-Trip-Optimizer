@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EV Trip Optimizer Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f5f6fa;
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      background-color: #2f3640;
+      color: #f5f6fa;
+      padding: 1rem;
+      text-align: center;
+      font-size: 1.8rem;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 1rem;
+      padding: 1rem;
+    }
+    .card {
+      background-color: #fff;
+      border-radius: 10px;
+      padding: 1rem;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+    form input, form select, form button {
+      width: 100%;
+      padding: 0.5rem;
+      margin: 0.5rem 0;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    form button {
+      background-color: #44bd32;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+      border: none;
+    }
+    form button:hover {
+      background-color: #4cd137;
+    }
+    h3 {
+      margin-top: 0;
+    }
+    #output {
+      background-color: #f1f2f6;
+      padding: 0.5rem;
+      border-radius: 5px;
+      height: 150px;
+      overflow: auto;
+    }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 900px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+      .charts {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>EV Trip Optimizer Dashboard</header>
+  <main>
+    <div class="card">
+      <h3>Trip Input</h3>
+      <form id="tripForm">
+        Distance (km): <input type="number" id="distance" required><br>
+        Battery %: <input type="number" id="battery" required><br>
+        Outside Temp (°C): <input type="number" id="outside" required><br>
+        Battery Temp (°C): <input type="number" id="battTemp" required><br>
+        Traffic: 
+        <select id="traffic">
+          <option>Light</option>
+          <option>Medium</option>
+          <option>Heavy</option>
+        </select><br>
+        Driving:
+        <select id="driving">
+          <option>Highway</option>
+          <option>Intracity</option>
+          <option>Uphill</option>
+          <option>Downhill</option>
+        </select><br>
+        Mode:
+        <select id="mode">
+          <option>Eco</option>
+          <option>Normal</option>
+          <option>Sport</option>
+          <option>Custom</option>
+        </select><br>
+        Payload (kg): <input type="number" id="payload" required><br>
+        <button type="submit">Optimize Trip</button>
+      </form>
+      <h3>Results</h3>
+      <pre id="output"></pre>
+    </div>
+    <div class="card charts">
+      <div id="batteryVsDistance" style="width:100%;height:250px;"></div>
+      <div id="speedVsConsumption" style="width:100%;height:250px;"></div>
+      <div id="modeComparison" style="width:100%;height:250px;"></div>
+      <div id="energyBreakdown" style="width:100%;height:250px;"></div>
+      <div id="projectedRange" style="width:100%;height:250px;"></div>
+    </div>
+  </main>
+
+  <script>
+    document.getElementById("tripForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = {
+        distance_km: parseFloat(document.getElementById("distance").value),
+        battery_percent: parseFloat(document.getElementById("battery").value),
+        outside_temp: parseFloat(document.getElementById("outside").value),
+        battery_temp: parseFloat(document.getElementById("battTemp").value),
+        traffic: document.getElementById("traffic").value,
+        driving: document.getElementById("driving").value,
+        mode: document.getElementById("mode").value,
+        payload: parseFloat(document.getElementById("payload").value)
+      };
+
+      try {
+        const res = await axios.post("http://127.0.0.1:8000/optimize", data);
+        document.getElementById("output").innerText = JSON.stringify(res.data, null, 2);
+        const result = res.data;
+
+        // Battery % vs Distance
+        Plotly.newPlot("batteryVsDistance", [{
+          x: result.charts.battery_vs_distance.map(d=>d.x),
+          y: result.charts.battery_vs_distance.map(d=>d.y),
+          mode: "lines+markers",
+          name: "Battery %"
+        }], { title: "Battery % vs Distance" });
+
+        // Speed vs Consumption
+        Plotly.newPlot("speedVsConsumption", [{
+          x: result.charts.speed_vs_consumption.map(d=>d.x),
+          y: result.charts.speed_vs_consumption.map(d=>d.y),
+          mode: "lines+markers",
+          name: "Consumption kWh/km"
+        }], { title: "Speed vs Consumption" });
+
+        // Mode Comparison
+        Plotly.newPlot("modeComparison", [{
+          x: result.charts.mode_comparison.map(d=>d.mode),
+          y: result.charts.mode_comparison.map(d=>d.range),
+          type: "bar"
+        }], { title: "Mode Comparison (Predicted Range km)" });
+
+        // Energy Breakdown
+        Plotly.newPlot("energyBreakdown", [{
+          values: Object.values(result.charts.energy_breakdown),
+          labels: Object.keys(result.charts.energy_breakdown),
+          type: "pie"
+        }], { title: "Energy Breakdown" });
+
+        // Projected Range
+        Plotly.newPlot("projectedRange", [{
+          type: "indicator",
+          mode: "gauge+number",
+          value: result.predicted_range,
+          title: { text: "Projected Range (km)" },
+          gauge: { axis: { range: [0, 300] } }
+        }]);
+
+      } catch (err) {
+        document.getElementById("output").innerText = "Error: " + err;
+      }
+    });
+  </script>
+</body>
+</html>

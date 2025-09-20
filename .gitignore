@@ -1,0 +1,12 @@
+# Ignore pickle files
+*.pkl
+
+# Ignore CSV files
+*.csv
+
+# Ignore virtual environment folders
+venv/
+env/
+
+# Ignore Python cache
+__pycache__/
