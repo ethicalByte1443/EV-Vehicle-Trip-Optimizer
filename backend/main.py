@@ -1,3 +1,8 @@
+# ********* FEATURES USED: *************************
+# Speed_kmh,Acceleration_ms2,Battery_State_%,Battery_Voltage_V,Battery_Temperature_C,Driving_Mode,Road_Type,Traffic_Condition,Slope_%,Weather_Condition,Temperature_C,Humidity_%,Wind_Speed_ms,Tire_Pressure_psi,Vehicle_Weight_kg,Distance_Travelled_km,Energy_Consumption_kWh
+
+
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,7 +10,7 @@ import pandas as pd
 import joblib
 
 # Load trained ML model
-model = joblib.load(r"C:\Users\Aseem\Desktop\GIT\EV-Vehicle-Battery Optimization\notebooks\energy_model.pkl")
+model = joblib.load(r"C:\Users\Aseem\Desktop\GIT\EV-Vehicle-Battery Optimization\models\energy_model.pkl")
 
 app = FastAPI()
 
@@ -168,3 +173,105 @@ def optimize_trip(data: TripInput):
         },
         "enhance_button": distance_warning
     }
+
+
+
+
+@app.post("/enhance_trip")
+def enhance_trip(data: TripInput):
+    input_features = preprocess_input(data)
+    energy_per_km_ml = float(model.predict(input_features)[0])
+
+    # Constants
+    g = 9.81
+    air_density = 1.225
+    C_d = 0.28
+    A = 2.2
+    C_r = 0.01
+    m_base = 1500
+    aux_kWh_per_km = 0.02
+    battery_capacity_kWh = 50
+
+    total_mass = m_base + data.payload
+    slope_factor = {"Uphill": 0.05, "Downhill": -0.03, "Highway": 0, "Intracity": 0}
+    slope = slope_factor.get(data.driving, 0)
+
+    traffic_factor = {"Light": 0.95, "Medium": 1.0, "Heavy": 1.1}
+    traffic_adj = traffic_factor.get(data.traffic, 1.0)
+
+    # -------------------------
+    # Trip Calculation Function
+    # -------------------------
+    def calculate_trip(speed, ac, regen, accel):
+        # Speed effect
+        v = speed * 1000 / 3600
+        E_aero = 0.5 * air_density * C_d * A * v**2
+        E_rolling = C_r * total_mass * g * (1 + slope)
+        E_physics = ((E_rolling + E_aero) * 1000 / 3600000) * traffic_adj + aux_kWh_per_km
+
+        energy_per_km = (energy_per_km_ml * 0.5 + E_physics * 0.5)
+
+        # AC effect
+        if ac == "OFF":
+            energy_per_km -= 0.01
+        elif isinstance(ac, int):  # temperature
+            energy_per_km += 0.01
+
+        # Regen effect
+        if regen == "High":
+            energy_per_km *= 0.95
+
+        # Acceleration effect
+        if accel == "Low":
+            energy_per_km *= 0.97
+
+        available_energy = (data.battery_percent / 100) * battery_capacity_kWh
+        possible_range = available_energy / energy_per_km
+
+        energy_required = data.distance_km * energy_per_km
+        required_battery_percent = (energy_required / battery_capacity_kWh) * 100
+
+        expected_battery_percent = max(data.battery_percent - required_battery_percent - 5, 0)
+
+        return {
+            "enhanced_settings": {
+                "mode": "Eco",
+                "speed": speed,
+                "ac": ac,
+                "regen": regen,
+                "acceleration_limit": accel
+            },
+            "possible_range_km": round(possible_range, 2),
+            "expected_battery_after_trip": round(expected_battery_percent, 2),
+            "required_battery_percent": round(required_battery_percent, 2),
+            "energy_per_km": round(energy_per_km, 3)
+        }
+
+    # -------------------------
+    # Iterative Optimization
+    # -------------------------
+    candidates = []
+    for speed in [45, 50, 55]:
+        for ac in ["OFF", 20, 26]:
+            for regen in ["High"]:
+                for accel in ["Low", "Medium"]:
+                    res = calculate_trip(speed, ac, regen, accel)
+                    if res["possible_range_km"] >= data.distance_km:
+                        candidates.append(res)
+
+    if candidates:
+        # ✅ feasible → choose best with max battery left
+        best = max(candidates, key=lambda x: x["expected_battery_after_trip"])
+        best["status"] = "✅ Trip feasible with optimised settings"
+        return best
+    else:
+        # ⚠️ not feasible → suggest min charge needed correctly
+        worst_case = calculate_trip(45, "OFF", "High", "Low")
+
+        # energy needed for actual distance
+        min_charge_needed_percent = (data.distance_km * worst_case["energy_per_km"]) / battery_capacity_kWh * 100
+
+        worst_case["status"] = "⚠️ Trip not possible with current charge"
+        worst_case["min_charge_needed_percent"] = round(min_charge_needed_percent, 2)
+
+        return worst_case

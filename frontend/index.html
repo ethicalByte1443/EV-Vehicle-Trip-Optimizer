@@ -173,6 +173,47 @@
 
   <script>
     const enhanceBtn = document.getElementById("enhanceButton");
+    enhanceBtn.addEventListener("click", async () => {
+      const data = {
+        distance_km: parseFloat(document.getElementById("distance").value),
+        battery_percent: parseFloat(document.getElementById("battery").value),
+        outside_temp: parseFloat(document.getElementById("outside").value),
+        battery_temp: parseFloat(document.getElementById("battTemp").value),
+        traffic: document.getElementById("traffic").value,
+        driving: document.getElementById("driving").value,
+        mode: document.getElementById("mode").value,
+        payload: parseFloat(document.getElementById("payload").value)
+      };
+
+      try {
+        const res = await axios.post("http://127.0.0.1:8000/enhance_trip", data);
+        const result = res.data;
+
+        let outputText = "✅ Enhanced Trip Settings Applied:\n\n";
+        outputText += "🚗 Recommended Settings:\n";
+        for (const [key, value] of Object.entries(result.enhanced_settings)) {
+          outputText += `   • ${key}: ${value}\n`;
+        }
+
+        outputText += `\n🚀 Possible Range: ${result.possible_range_km} km\n`;
+        outputText += `🔋 Expected Battery After Trip: ${result.expected_battery_after_trip}%\n`;
+
+        if (result.min_charge_needed_percent !== undefined) {
+          outputText += `\n⚠️ Minimum Battery Required: ${result.min_charge_needed_percent}%\n`;
+          outputText += "👉 Please charge before starting the trip.\n";
+        }
+
+        if (result.status) {
+          outputText += `\nℹ️ ${result.status}`;
+        }
+
+        document.getElementById("output").innerText = outputText;
+
+      } catch (err) {
+        document.getElementById("output").innerText = "Error enhancing trip: " + err;
+      }
+    });
+
 
     document.getElementById("tripForm").addEventListener("submit", async (e) => {
       e.preventDefault();
