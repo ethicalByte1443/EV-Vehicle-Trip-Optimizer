@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import joblib
+import numpy as np
 
 # --------------------------
 # Load trained ML model
@@ -28,7 +29,7 @@ class TripInput(BaseModel):
     battery_percent: float
     battery_voltage: float
     battery_temp: float
-    driving_mode: int       # 1,2,3
+    driving_mode: int       # 1,2,3 (or your encoding)
     road_type: int          # 1,2,3
     traffic_condition: int  # 1,2,3
     slope_percent: float
@@ -38,7 +39,7 @@ class TripInput(BaseModel):
     wind_speed_ms: float
     tire_pressure_psi: float
     vehicle_weight_kg: float
-    distance_travelled_km: float
+    distance_travelled_km: float  # <-- interpreted as planned trip distance
 
 # --------------------------
 # Preprocess input for ML
@@ -50,11 +51,11 @@ def preprocess_input(data: TripInput):
         "Battery_State_%": data.battery_percent,
         "Battery_Voltage_V": data.battery_voltage,
         "Battery_Temperature_C": data.battery_temp,
-        "Driving_Mode": int(data.driving_mode),        # 1,2,3
-        "Road_Type": int(data.road_type),              # 1,2,3
-        "Traffic_Condition": int(data.traffic_condition), # 1,2,3
+        "Driving_Mode": int(data.driving_mode),
+        "Road_Type": int(data.road_type),
+        "Traffic_Condition": int(data.traffic_condition),
         "Slope_%": data.slope_percent,
-        "Weather_Condition": int(data.weather_condition), # 1,2,3
+        "Weather_Condition": int(data.weather_condition),
         "Temperature_C": data.temperature_c,
         "Humidity_%": data.humidity_percent,
         "Wind_Speed_ms": data.wind_speed_ms,
@@ -63,7 +64,6 @@ def preprocess_input(data: TripInput):
         "Distance_Travelled_km": data.distance_travelled_km
     }])
 
-    # Ensure column order matches the ML model
     expected_cols = [
         "Speed_kmh", "Acceleration_ms2", "Battery_State_%", "Battery_Voltage_V", "Battery_Temperature_C",
         "Driving_Mode", "Road_Type", "Traffic_Condition", "Slope_%", "Weather_Condition",
@@ -74,55 +74,80 @@ def preprocess_input(data: TripInput):
     df = df[expected_cols]
     return df
 
-
 # --------------------------
-# Physics-based energy calculation
+# Physics components & energy calculation
 # --------------------------
-def physics_energy_consumption(data: TripInput):
+def physics_components_per_km(data: TripInput):
+    """
+    Returns physics component contributions (kWh per km) as dict:
+    { 'aero': ..., 'rolling': ..., 'aux': ..., 'payload': ..., 'misc': ... }
+    """
     g = 9.81
     air_density = 1.225
     C_d = 0.28
     A = 2.2
     C_r = 0.01
     aux_kWh_per_km = 0.02
+    misc_kWh_per_km = 0.01
+    payload_factor = 0.0001  # kWh per kg per km (approx used earlier)
 
     total_mass = data.vehicle_weight_kg
     v = data.speed_kmh * 1000 / 3600  # m/s
-    slope = data.slope_percent / 100
-    traffic_adj = {"Light": 0.95, "Medium": 1.0, "Heavy": 1.1}.get(data.traffic_condition, 1.0)
+    slope = data.slope_percent / 100.0
+    # traffic codes: 1->Light,2->Medium,3->Heavy (adjust if your encoding differs)
+    traffic_adj = {1: 0.95, 2: 1.0, 3: 1.1}.get(data.traffic_condition, 1.0)
 
-    E_rolling = C_r * total_mass * g * (1 + slope)
-    E_aero = 0.5 * air_density * C_d * A * v**2
-    E_physics_per_km = ((E_rolling + E_aero) * 1000 / 3600000) * traffic_adj + aux_kWh_per_km
+    # Forces/energies in J per m, convert to kWh per km:
+    E_rolling_J_per_m = C_r * total_mass * g * (1 + slope)  # N
+    E_rolling_kWh_per_km = (E_rolling_J_per_m * 1000 / 3600000) * traffic_adj
 
+    E_aero_J_per_m = 0.5 * air_density * C_d * A * v**2
+    E_aero_kWh_per_km = (E_aero_J_per_m * 1000 / 3600000) * traffic_adj
+
+    payload_kWh_per_km = payload_factor * total_mass
+
+    # temperature adjustment (affects overall physics energy)
     temp_adj = 1.0 if data.temperature_c >= 10 else 1 + (10 - data.temperature_c) * 0.02
-    E_physics_per_km *= temp_adj
 
-    return E_physics_per_km
+    return {
+        "aero": E_aero_kWh_per_km * temp_adj,
+        "rolling": E_rolling_kWh_per_km * temp_adj,
+        "aux": aux_kWh_per_km * temp_adj,
+        "payload": payload_kWh_per_km * temp_adj,
+        "misc": misc_kWh_per_km * temp_adj
+    }
+
+def physics_energy_consumption(data: TripInput):
+    comps = physics_components_per_km(data)
+    # sum of physics derived components (kWh per km)
+    total_physics_kWh_per_km = comps["aero"] + comps["rolling"] + comps["aux"] + comps["payload"] + comps["misc"]
+    return total_physics_kWh_per_km
+
+# --------------------------
+# Helper to compute combined ML+physics for an arbitrary input dict
+# --------------------------
+def compute_combined_energy_per_km_from_dict(d: dict):
+    # build TripInput (this validates types)
+    ti = TripInput(**d)
+    input_features = preprocess_input(ti)
+    e_ml = float(model.predict(input_features)[0])
+    e_phys = physics_energy_consumption(ti)
+    return 0.7 * e_ml + 0.3 * e_phys
 
 # --------------------------
 # Intelligent recommended settings
 # --------------------------
-def intelligent_settings(data, energy_per_km):
+def intelligent_settings(data: TripInput, energy_per_km: float):
+    # treat distance_travelled_km as planned trip distance (trip length)
     speed = data.speed_kmh
     if data.battery_percent < 40:
         speed -= 10
     elif data.battery_percent > 70 and data.distance_travelled_km < 50:
         speed += 15
 
-    if data.driving_mode == "Uphill":
-        speed -= 5
-    elif data.driving_mode == "Downhill":
-        speed += 5
-
-    if data.traffic_condition == "Heavy":
-        speed -= 10
-    elif data.traffic_condition == "Light":
-        speed += 5
-
     speed = max(30, min(speed, 120))
-    ac = 22 if data.temperature_c < 25 else min(26, 20 + data.temperature_c*0.3)
-    regen = "High" if data.driving_mode == "Downhill" or data.traffic_condition == "Heavy" else "Medium"
+    ac = 22 if data.temperature_c < 25 else min(26, 20 + data.temperature_c * 0.3)
+    regen = "High" if data.driving_mode == 3 or data.traffic_condition == 3 else "Medium"
     accel = "Low" if data.battery_percent < 30 or data.vehicle_weight_kg > 2000 else "Medium"
 
     return {"speed": round(speed), "ac": round(ac), "regen": regen, "acceleration_limit": accel}
@@ -132,85 +157,80 @@ def intelligent_settings(data, energy_per_km):
 # --------------------------
 @app.post("/optimize_trip")
 def optimize_trip(data: TripInput):
+    # Preprocess & base predictions (for the given planned trip scenario)
     input_features = preprocess_input(data)
     energy_per_km_ml = float(model.predict(input_features)[0])
     energy_per_km_physics = physics_energy_consumption(data)
-
     energy_per_km = 0.7 * energy_per_km_ml + 0.3 * energy_per_km_physics
+    print(energy_per_km_ml)
+    print(energy_per_km_physics)
 
-    battery_capacity_kWh = 50
-    available_energy = (data.battery_percent / 100) * battery_capacity_kWh
-    battery_used = energy_per_km * data.distance_travelled_km
-    battery_left_percent = max(0, (available_energy - battery_used) / battery_capacity_kWh * 100)
-    predicted_range_km = available_energy / energy_per_km
-    distance_warning = battery_left_percent <= 0
+    # Battery / range calculations (distance_travelled_km is the planned trip distance)
+    battery_capacity_kWh = 50.0
+    available_energy_kWh = (data.battery_percent / 100.0) * battery_capacity_kWh
+    battery_used_kWh = energy_per_km * data.distance_travelled_km
+    battery_left_kWh = max(available_energy_kWh - battery_used_kWh, 0.0)
+    battery_left_percent = (battery_left_kWh / battery_capacity_kWh) * 100.0
+    predicted_range_km = available_energy_kWh / energy_per_km if energy_per_km > 0 else float("inf")
+    distance_warning = battery_left_kWh <= 0
 
-    recommended_settings = intelligent_settings(data, energy_per_km)
+    recommended = intelligent_settings(data, energy_per_km)
+
+    # --------------------------
+    # Charts (min 10 points) — ALL use the SAME combined ML+physics method
+    # --------------------------
+    trip_distance = float(data.distance_travelled_km)
+    n_points = 10
+
+    # 1) Battery vs Distance (remaining battery % along the planned trip)
+    distances = np.linspace(0.0, trip_distance, n_points)
+    battery_vs_distance = []
+    # energy_per_km is constant under constant conditions; use it directly
+    for d in distances:
+        used_kWh = energy_per_km * d
+        remaining_percent = max((available_energy_kWh - used_kWh) / battery_capacity_kWh * 100.0, 0.0)
+        battery_vs_distance.append({"distance": float(d), "battery_percent": float(round(remaining_percent, 6))})
+
+    # 2) Speed vs Consumption (recompute combined energy for each speed)
+    speeds = np.linspace(30.0, 120.0, n_points)
+    speed_vs_consumption = []
+    base_dict = data.dict()
+    for s in speeds:
+        temp = dict(base_dict)
+        temp["speed_kmh"] = float(s)
+        epk = compute_combined_energy_per_km_from_dict(temp)
+        speed_vs_consumption.append({"speed": float(round(s, 3)), "consumption": float(round(epk, 6))})
+
+    # 3) Mode comparison — evaluate effective range when switching "mode speed"
+    mode_speed_dict = {"Eco": 55.0, "Normal": 70.0, "Sport": 85.0, "Custom": 65.0}
+    mode_comparison = []
+    for m, spd in mode_speed_dict.items():
+        temp = dict(base_dict)
+        temp["speed_kmh"] = float(spd)
+        epk = compute_combined_energy_per_km_from_dict(temp)
+        available_energy_kWh = (data.battery_percent / 100.0) * battery_capacity_kWh
+        predicted_range_by_mode = available_energy_kWh / epk if epk > 0 else float("inf")
+        mode_comparison.append({"mode": m, "range": float(round(predicted_range_by_mode, 2))})
+
+    # 4) Energy breakdown (physics-based components multiplied by trip length)
+    comps_per_km = physics_components_per_km(data)
+    energy_breakdown = [
+        {"component": "AC", "energy_kWh": float(round(comps_per_km["aux"] * trip_distance, 6))},
+        {"component": "Speed & Drag", "energy_kWh": float(round(comps_per_km["aero"] * trip_distance, 6))},
+        {"component": "Rolling Resistance", "energy_kWh": float(round(comps_per_km["rolling"] * trip_distance, 6))},
+        {"component": "Payload", "energy_kWh": float(round(comps_per_km["payload"] * trip_distance, 6))},
+        {"component": "Misc", "energy_kWh": float(round(comps_per_km["misc"] * trip_distance, 6))}
+    ]
 
     return {
-        "recommended_settings": recommended_settings,
-        "predicted_range_km": round(predicted_range_km, 2),
-        "battery_left_percent": round(battery_left_percent, 2),
-        "distance_warning": distance_warning
-    }
-
-# --------------------------
-# Enhance trip endpoint
-# --------------------------
-@app.post("/enhance_trip")
-def enhance_trip(data: TripInput):
-    input_features = preprocess_input(data)
-    energy_per_km_ml = float(model.predict(input_features)[0])
-    battery_capacity_kWh = 50
-
-    def calculate_trip(speed, ac, regen, accel):
-        v = speed * 1000 / 3600
-        E_aero = 0.5 * 1.225 * 0.28 * 2.2 * v**2
-        E_rolling = 0.01 * data.vehicle_weight_kg * 9.81 * (1 + data.slope_percent / 100)
-        E_physics = ((E_rolling + E_aero) * 1000 / 3600000) * {"Light": 0.95, "Medium": 1.0, "Heavy": 1.1}.get(data.traffic_condition, 1.0) + 0.02
-
-        energy_per_km = 0.5 * energy_per_km_ml + 0.5 * E_physics
-
-        if ac == "OFF":
-            energy_per_km -= 0.01
-        elif isinstance(ac, int):
-            energy_per_km += 0.01
-
-        if regen == "High":
-            energy_per_km *= 0.95
-        if accel == "Low":
-            energy_per_km *= 0.97
-
-        available_energy = (data.battery_percent / 100) * battery_capacity_kWh
-        possible_range = available_energy / energy_per_km
-        energy_required = data.distance_travelled_km * energy_per_km
-        required_battery_percent = (energy_required / battery_capacity_kWh) * 100
-        expected_battery_percent = max(data.battery_percent - required_battery_percent - 5, 0)
-
-        return {
-            "enhanced_settings": {"mode": "Eco", "speed": speed, "ac": ac, "regen": regen, "acceleration_limit": accel},
-            "possible_range_km": round(possible_range, 2),
-            "expected_battery_after_trip": round(expected_battery_percent, 2),
-            "required_battery_percent": round(required_battery_percent, 2),
-            "energy_per_km": round(energy_per_km, 3)
+        "recommended_settings": recommended,
+        "predicted_range_km": float(round(predicted_range_km, 2)),
+        "battery_left_percent": float(round(battery_left_percent, 2)),
+        "distance_warning": bool(distance_warning),
+        "charts": {
+            "battery_vs_distance": battery_vs_distance,
+            "speed_vs_consumption": speed_vs_consumption,
+            "mode_comparison": mode_comparison,
+            "energy_breakdown": energy_breakdown
         }
-
-    candidates = []
-    for speed in [45, 50, 55]:
-        for ac in ["OFF", 20, 26]:
-            for regen in ["High"]:
-                for accel in ["Low", "Medium"]:
-                    res = calculate_trip(speed, ac, regen, accel)
-                    if res["possible_range_km"] >= data.distance_travelled_km:
-                        candidates.append(res)
-
-    if candidates:
-        best = max(candidates, key=lambda x: x["expected_battery_after_trip"])
-        best["status"] = "✅ Trip feasible with optimised settings"
-        return best
-    else:
-        worst_case = calculate_trip(45, "OFF", "High", "Low")
-        min_charge_needed_percent = (data.distance_travelled_km * worst_case["energy_per_km"]) / battery_capacity_kWh * 100
-        worst_case["status"] = "⚠️ Trip not possible with current charge"
-        worst_case["min_charge_needed_percent"] = round(min_charge_needed_percent, 2)
-        return worst_case
+    }

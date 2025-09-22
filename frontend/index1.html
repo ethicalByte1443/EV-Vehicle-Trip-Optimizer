@@ -229,7 +229,7 @@
       };
 
       try {
-        const res = await axios.post("http://127.0.0.1:8000/optimize_trip", data);
+        const res = await axios.post("http://127.0.0.1:8001/optimize_trip", data);
         const result = res.data;
         document.getElementById("output").innerText = JSON.stringify(result, null, 2);
 

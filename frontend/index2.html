@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>EV Feature Input Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.plotly.com/plotly-latest.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f5f6fa;
+        }
+
+        header {
+            background: #2f3640;
+            color: #fff;
+            text-align: center;
+            padding: 1rem;
+            font-size: 1.8rem;
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .card {
+            background: #fff;
+            border-radius: 10px;
+            padding: 1rem;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+        }
+
+        form input,
+        form select,
+        form button {
+            width: 100%;
+            padding: 0.4rem;
+            margin: 0.3rem 0;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            font-size: 0.9rem;
+        }
+
+        form button {
+            background: #44bd32;
+            color: #fff;
+            font-weight: bold;
+            border: none;
+            cursor: pointer;
+        }
+
+        form button:hover {
+            background: #4cd137;
+        }
+
+        #output {
+            background: #f1f2f6;
+            padding: 0.5rem;
+            border-radius: 5px;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            max-height: 200px;
+            overflow: auto;
+        }
+
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            grid-auto-rows: 300px;
+            gap: 1rem;
+        }
+
+        .charts>div {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <header>EV Feature Input Dashboard</header>
+    <main>
+        <div class="card">
+            <!-- ...existing code... -->
+            <button type="submit">Send Data</button>
+            <button type="button" id="sendDummyBtn" style="background:#273c75;margin-top:0.5rem;color:#fff;">Send Dummy
+                Data</button>
+            <!-- ...existing code... -->
+            <h3>Enter EV Data</h3>
+            <form id="featureForm">
+                Speed (km/h): <input type="number" id="speed_kmh" step="0.01" required>
+                Acceleration (m/s²): <input type="number" id="acceleration_ms2" step="0.01" required>
+                Battery %: <input type="number" id="battery_percent" step="0.01" required>
+                Battery Voltage (V): <input type="number" id="battery_voltage" step="0.01" required>
+                Battery Temp (°C): <input type="number" id="battery_temp" step="0.01" required>
+                Driving Mode:
+                <select id="driving_mode">
+                    <option value="0">Eco</option>
+                    <option value="1">Normal</option>
+                    <option value="2">Sport</option>
+                </select>
+                Road Type:
+                <select id="road_type">
+                    <option value="0">Highway</option>
+                    <option value="1">City</option>
+                    <option value="2">Rural</option>
+                </select>
+                Traffic Condition:
+                <select id="traffic_condition">
+                    <option value="0">Light</option>
+                    <option value="1">Medium</option>
+                    <option value="2">Heavy</option>
+                </select>
+                Slope (%): <input type="number" id="slope_percent" step="0.01" required>
+                Weather Condition:
+                <select id="weather_condition">
+                    <option value="0">Clear</option>
+                    <option value="1">Rain</option>
+                    <option value="2">Snow</option>
+                </select>
+                Outside Temp (°C): <input type="number" id="temperature_c" step="0.01" required>
+                Humidity (%): <input type="number" id="humidity_percent" step="0.01" required>
+                Wind Speed (m/s): <input type="number" id="wind_speed_ms" step="0.01" required>
+                Tire Pressure (PSI): <input type="number" id="tire_pressure_psi" step="0.01" required>
+                Vehicle Weight (kg): <input type="number" id="vehicle_weight_kg" step="0.01" required>
+                Distance Travelled (km): <input type="number" id="distance_travelled_km" step="0.01" required>
+
+                <button type="submit">Send Data</button>
+            </form>
+
+            <h3>API Response</h3>
+            <pre id="output"></pre>
+        </div>
+
+        <div class="card charts">
+            <div id="batteryVsDistance"></div>
+            <div id="speedVsConsumption"></div>
+            <div id="modeComparison"></div>
+            <div id="energyBreakdown"></div>
+        </div>
+    </main>
+
+    <script>
+        // replace previous ensurePlotly + updateUIWithResult with a CDN-fallback + graceful-disable approach
+
+        // small helper to load a script with timeout
+        function loadScript(url, timeout = 7000) {
+            return new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                let done = false;
+                const t = setTimeout(() => {
+                    if (done) return;
+                    done = true;
+                    s.onerror = s.onload = null;
+                    reject(new Error('timeout'));
+                }, timeout);
+                s.onload = () => {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(t);
+                    resolve();
+                };
+                s.onerror = () => {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(t);
+                    reject(new Error('load error'));
+                };
+                s.src = url;
+                document.head.appendChild(s);
+            });
+        }
+
+        // try several CDNs, then fallback to "no-plot" mode if none load
+        async function ensurePlotly() {
+            if (typeof Plotly !== 'undefined') {
+                window.PLOTLY_AVAILABLE = true;
+                return;
+            }
+            const cdns = [
+                'https://cdn.plot.ly/plotly-latest.min.js',
+                'https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.24.1/plotly.min.js',
+                'https://unpkg.com/plotly.js-dist-min@2.24.1/plotly.min.js'
+            ];
+            for (const url of cdns) {
+                try {
+                    await loadScript(url, 6000);
+                    if (typeof Plotly !== 'undefined') {
+                        window.PLOTLY_AVAILABLE = true;
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('Plotly load failed from', url, e);
+                }
+            }
+            // final fallback: mark unavailable (UI will skip plotting)
+            window.PLOTLY_AVAILABLE = false;
+            throw new Error('Failed to load Plotly from CDNs');
+        }
+
+        // update UI and attempt plotting only if Plotly loaded; otherwise show placeholder text
+        async function updateUIWithResult(result) {
+            document.getElementById("output").innerText = JSON.stringify(result, null, 2);
+            const layout = { margin: { t: 30, l: 40, r: 10, b: 40 } };
+
+            try {
+                await ensurePlotly();
+            } catch (err) {
+                console.warn('Plotly not available — skipping charts:', err);
+                ['batteryVsDistance','speedVsConsumption','modeComparison','energyBreakdown'].forEach(id=>{
+                    const el = document.getElementById(id);
+                    if (el) el.innerText = 'Plotly not available — charts disabled (network/CDN issue)';
+                });
+                return;
+            }
+
+            // Battery vs Distance
+            if (result.charts && result.charts.battery_vs_distance) {
+                Plotly.newPlot("batteryVsDistance", [{
+                    x: result.charts.battery_vs_distance.map(d => d.distance),
+                    y: result.charts.battery_vs_distance.map(d => d.battery_percent),
+                    mode: "lines+markers",
+                    name: "Battery %"
+                }], { ...layout, title: "Battery % vs Distance" });
+            }
+
+            // Speed vs Consumption
+            if (result.charts && result.charts.speed_vs_consumption) {
+                Plotly.newPlot("speedVsConsumption", [{
+                    x: result.charts.speed_vs_consumption.map(d => d.speed),
+                    y: result.charts.speed_vs_consumption.map(d => d.consumption),
+                    mode: "lines+markers",
+                    name: "Consumption (kWh/km)"
+                }], { ...layout, title: "Speed vs Consumption" });
+            }
+
+            // Mode Comparison
+            if (result.charts && result.charts.mode_comparison) {
+                Plotly.newPlot("modeComparison", [{
+                    x: result.charts.mode_comparison.map(d => d.mode),
+                    y: result.charts.mode_comparison.map(d => d.range),
+                    type: "bar",
+                    name: "Predicted Range"
+                }], { ...layout, title: "Mode Comparison (Range km)" });
+            }
+
+            // Energy Breakdown
+            if (result.charts && result.charts.energy_breakdown) {
+                Plotly.newPlot("energyBreakdown", [{
+                    values: result.charts.energy_breakdown.map(d => d.energy_kWh),
+                    labels: result.charts.energy_breakdown.map(d => d.component),
+                    type: "pie"
+                }], { ...layout, title: "Energy Breakdown" });
+            }
+        }
+
+         // Form submission handler
+         document.getElementById("featureForm").addEventListener("submit", async (e) => {
+             e.preventDefault();
+
+             const data = {
+                 speed_kmh: parseFloat(document.getElementById("speed_kmh").value),
+                 acceleration_ms2: parseFloat(document.getElementById("acceleration_ms2").value),
+                 battery_percent: parseFloat(document.getElementById("battery_percent").value),
+                 battery_voltage: parseFloat(document.getElementById("battery_voltage").value),
+                 battery_temp: parseFloat(document.getElementById("battery_temp").value),
+                 driving_mode: parseInt(document.getElementById("driving_mode").value),
+                 road_type: parseInt(document.getElementById("road_type").value),
+                 traffic_condition: parseInt(document.getElementById("traffic_condition").value),
+                 slope_percent: parseFloat(document.getElementById("slope_percent").value),
+                 weather_condition: parseInt(document.getElementById("weather_condition").value),
+                 temperature_c: parseFloat(document.getElementById("temperature_c").value),
+                 humidity_percent: parseFloat(document.getElementById("humidity_percent").value),
+                 wind_speed_ms: parseFloat(document.getElementById("wind_speed_ms").value),
+                 tire_pressure_psi: parseFloat(document.getElementById("tire_pressure_psi").value),
+                 vehicle_weight_kg: parseFloat(document.getElementById("vehicle_weight_kg").value),
+                 distance_travelled_km: parseFloat(document.getElementById("distance_travelled_km").value),
+             };
+
+             try {
+                 const res = await axios.post("http://127.0.0.1:8000/optimize_trip", data);
+                 await updateUIWithResult(res.data);
+             } catch (err) {
+                 document.getElementById("output").innerText = "Error: " + (err.response ? err.response.data : err.message);
+             }
+         });
+
+        // Dummy payload
+        const dummyPayload = {
+            speed_kmh: 42.75,
+            acceleration_ms2: 1.12,
+            battery_percent: 89.57,
+            battery_voltage: 366.84,
+            battery_temp: 29.97,
+            driving_mode: 3,
+            road_type: 1,
+            traffic_condition: 1,
+            slope_percent: -4.49,
+            weather_condition: 2,
+            temperature_c: 9.36,
+            humidity_percent: 35.73,
+            wind_speed_ms: 9.35,
+            tire_pressure_psi: 33.03,
+            vehicle_weight_kg: 1000.68,
+            distance_travelled_km: 300.88
+        };
+
+        // Dummy button handler
+        document.getElementById("sendDummyBtn").addEventListener("click", async () => {
+            document.getElementById("output").innerText = "Sending dummy payload...";
+            try {
+                const res = await axios.post("http://127.0.0.1:8000/optimize_trip", dummyPayload);
+                await updateUIWithResult(res.data); // ✅ now also plots graphs (loads Plotly if missing)
+            } catch (err) {
+                document.getElementById("output").innerText = "Dummy post error: " + (err.response ? err.response.data : err.message);
+            }
+        });
+    </script>
+
+</body>
+
+</html>
