@@ -17,7 +17,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------
 # Pydantic model for input
+# --------------------------
 class TripInput(BaseModel):
     distance_km: float
     battery_percent: float
@@ -28,7 +30,9 @@ class TripInput(BaseModel):
     mode: str
     payload: float
 
+# --------------------------
 # Preprocess input for ML model
+# --------------------------
 def preprocess_input(data: TripInput):
     df = pd.DataFrame([data.dict()])
     df = pd.get_dummies(df, columns=["traffic", "driving", "mode"])
@@ -46,9 +50,10 @@ def preprocess_input(data: TripInput):
     df = df[expected_cols]
     return df
 
+# --------------------------
 # Intelligent recommended settings
+# --------------------------
 def intelligent_settings(data, energy_per_km, total_mass):
-    # Speed based on battery & payload & traffic & terrain
     base_speed = 65
     speed = base_speed
 
@@ -57,41 +62,32 @@ def intelligent_settings(data, energy_per_km, total_mass):
     elif data.battery_percent > 70 and data.distance_km < 50:
         speed += 15
 
-    # Terrain & traffic adjustments
     if data.driving == "Uphill":
         speed -= 5
     elif data.driving == "Downhill":
         speed += 5
+
     if data.traffic == "Heavy":
         speed -= 10
     elif data.traffic == "Light":
         speed += 5
+
     speed = max(30, min(speed, 100))
-
-    # AC adjustment
     ac = 22 if data.outside_temp < 25 else min(26, 20 + data.outside_temp*0.3)
-
-    # Regen
-    if data.driving == "Downhill" or data.traffic == "Heavy":
-        regen = "High"
-    else:
-        regen = "Medium"
-
-    # Acceleration limit
-    if data.battery_percent < 30 or data.payload > 200:
-        accel = "Low"
-    else:
-        accel = "Medium"
+    regen = "High" if data.driving == "Downhill" or data.traffic == "Heavy" else "Medium"
+    accel = "Low" if data.battery_percent < 30 or data.payload > 200 else "Medium"
 
     return {"speed": round(speed), "ac": round(ac), "regen": regen, "acceleration_limit": accel}
 
-import math
-
-@app.post("/optimize")
+# --------------------------
+# Optimize trip endpoint
+# --------------------------
+@app.post("/optimize_trip")
 def optimize_trip(data: TripInput):
+    # ML prediction
     input_features = preprocess_input(data)
     energy_per_km_ml = float(model.predict(input_features)[0])
-
+    print(energy_per_km_ml)
     # Physics-based constants
     g = 9.81
     air_density = 1.225
@@ -100,6 +96,7 @@ def optimize_trip(data: TripInput):
     C_r = 0.01
     m_base = 1500
     aux_kWh_per_km = 0.02
+    battery_capacity_kWh = 50  # total battery capacity
 
     total_mass = m_base + data.payload
     mode_speed_dict = {"Eco": 55, "Normal": 70, "Sport": 85, "Custom": 65}
@@ -116,32 +113,37 @@ def optimize_trip(data: TripInput):
     E_aero = 0.5 * air_density * C_d * A * v**2
 
     E_physics_per_km = ((E_rolling + E_aero) * 1000 / 3600000) * traffic_adj + aux_kWh_per_km
-
     temp_adj = 1.0 if data.outside_temp >= 10 else 1 + (10 - data.outside_temp) * 0.02
 
+    # Combined ML + Physics
     energy_per_km = energy_per_km_ml * 0.7 + E_physics_per_km * 0.3
     energy_per_km *= temp_adj
 
-    battery_used = energy_per_km * data.distance_km
-    battery_left = max(data.battery_percent - battery_used, 0)
+    # Battery calculations
+    available_energy = (data.battery_percent / 100) * battery_capacity_kWh
+    battery_used_kWh = energy_per_km * data.distance_km
+    battery_left = max(available_energy - battery_used_kWh, 0)
+
+    predicted_range_km = available_energy / energy_per_km
+    distance_warning = battery_left <= 0
 
     recommended_settings = intelligent_settings(data, energy_per_km, total_mass)
 
-    # Battery vs distance chart
+    # --------------------------
+    # Charts
+    # --------------------------
     battery_vs_distance = [
-        {"x": i, "y": max(data.battery_percent - energy_per_km * i, 0)}
+        {"distance": i, "battery_percent": max(data.battery_percent - (energy_per_km*i/battery_capacity_kWh*100), 0)}
         for i in range(0, int(data.distance_km)+1, max(1, int(data.distance_km/10)))
     ]
 
-    # Speed vs consumption chart
     speed_vs_consumption = [
-        {"x": s, "y": ((0.5*air_density*C_d*A*(s*1000/3600)**2 + C_r*total_mass*g)/3600000 + aux_kWh_per_km)*temp_adj}
+        {"speed": s, "consumption": ((0.5*air_density*C_d*A*(s*1000/3600)**2 + C_r*total_mass*g)/3600000 + aux_kWh_per_km)*temp_adj}
         for s in range(30, 101, 10)
     ]
 
-    # Mode comparison chart
     mode_comparison = [
-        {"mode": m, "range": max(data.battery_percent - energy_per_km*(data.distance_km)*(speed_kmh/mode_speed_dict[m]), 0)}
+        {"mode": m, "range": max(predicted_range_km*(speed_kmh/mode_speed_dict[m]), 0)}
         for m in mode_speed_dict
     ]
 
@@ -153,13 +155,10 @@ def optimize_trip(data: TripInput):
         "Misc": 0.01*data.distance_km
     }
 
-    # Check if distance can be achieved
-    distance_warning = battery_left <= 0
-
     return {
         "recommended_settings": recommended_settings,
-        "predicted_range": round(data.distance_km - battery_used, 2),
-        "battery_left": round(battery_left, 2),
+        "predicted_range_km": round(predicted_range_km, 2),
+        "battery_left": round(battery_left/battery_capacity_kWh*100, 2),
         "distance_warning": distance_warning,
         "charts": {
             "battery_vs_distance": battery_vs_distance,
@@ -167,5 +166,5 @@ def optimize_trip(data: TripInput):
             "mode_comparison": mode_comparison,
             "energy_breakdown": energy_breakdown
         },
-        "enhance_button": distance_warning  # frontend can show "Enhance" if True
+        "enhance_button": distance_warning
     }
