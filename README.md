@@ -95,7 +95,7 @@ User → Frontend Form → APICaller → FastAPI Endpoint (/optimize)
 
 ### 📌 Class-Level LLD (Python Backend)
 
-```python
+```py
 class TripInput(BaseModel):
     distance_km: float
     battery_percent: float
